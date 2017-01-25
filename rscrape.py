@@ -1,6 +1,8 @@
+import logging
 import os
 import string
 
+from datetime import datetime
 from pprint import pprint
 
 import praw
@@ -10,7 +12,14 @@ import tqdm
 from imgurpython import ImgurClient
 from slugify import slugify
 
+logging.basicConfig(
+    format='%(asctime)s [%(levelname)s] %(funcName)s: %(message)s',
+    datefmt='%m/%d/%Y %I:%M:%S %p',
+)
 
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+                    
 reddit = praw.Reddit(
     client_id=os.getenv('REDDIT_CLIENT_ID'),
     client_secret=os.getenv('REDDIT_CLIENT_SECRET'),
@@ -72,12 +81,13 @@ class Extractor:
                 ))
             else:
                 return
-            
+
+        link = None 
         url = self.clean_url(submission.url) if self.clean_urls else submission.url
         try:
             link = self.extract_link(submission, url)
         except:
-            if raise_exceptions:
+            if self.raise_exceptions:
                 raise ExtractionError(
                     'Could not extract link from submission "{submission_id}"'
                     'using {extractor_type}'.format(
@@ -212,8 +222,13 @@ class Downloader:
 
             content_length = int(dl.headers.get('Content-Length', 0))
             num_chunks = content_length // 1024
-    
-            for chunk in tqdm.tqdm(dl_iter, total=num_chunks, unit='KB'):
+
+            logger.debug('Downloading [%(reddit_id)s] %(title)s', dict(
+                reddit_id=result.reddit_id,
+                title=result.title[:50] + '..'
+            ))
+            #for chunk in tqdm.tqdm(dl_iter, total=num_chunks, unit='KB'):
+            for chunk in dl_iter:
                 if chunk:
                     f.write(chunk)
                 else:
@@ -231,8 +246,11 @@ class Downloader:
 
 
 def scrape():
-    gfycats = reddit.subreddit('gfycats').hot(limit=5)
-    trees = reddit.subreddit('pics').hot(limit=50)
+    now = datetime.now()
+    total = 0
+
+    gfycats = reddit.subreddit('gfycats')
+    trees = reddit.subreddit('pics')
 
     d = DefaultExtractor()
     e = GfycatExtractor()
@@ -243,21 +261,32 @@ def scrape():
 
     results = []
     invalid = []
-    for submission in gfycats:
-        for extractor in extractors:
-            result = extractor.extract(submission)
-            if result:
-                results.append(result)
-                break
-        if not result:
-            invalid.append(submission.url)
 
+    subreddits = [gfycats, trees]
+    for subreddit in subreddits:
+        results = []
+        logger.info('Scraping subreddit: %s', subreddit.display_name)
+        submissions = subreddit.hot(limit=10)
+        for submission in submissions:
+            for extractor in extractors:
+                result = extractor.extract(submission)
+                if result:
+                    results.append(result)
+                    break
+            if not result:
+                invalid.append(submission.url)
 
-    dl = Downloader('test')
-    dl.download(results)
+        dl = Downloader(subreddit.display_name)
+        dl.download(results)
 
-    pprint(invalid)
+        logger.info('Finished scraping subreddit: %s total: %s',
+            subreddit.display_name, len(results))
+        total += len(results)
 
+    end = datetime.now()
+    logger.info('Invalid/incompatible urls: %s', invalid)
+    logger.info('Finished scraping all. Total: %s, Duration: %ss',
+        total, (end - now).total_seconds())
 
 if __name__ == '__main__':
     scrape()
